@@ -1,0 +1,39 @@
+name: Verify
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12', '3.14']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m py_compile github_autofix.py test_autofix.py
+      - run: python -m unittest discover -s . -p "test_*.py"
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          $Files = @('Install-GitHubAutoFix.ps1', 'Start-GitHubAutoFix.ps1')
+          foreach ($File in $Files) {
+              $Tokens = $null
+              $ParseErrors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $File), [ref]$Tokens, [ref]$ParseErrors) | Out-Null
+              if ($ParseErrors.Count -gt 0) {
+                  $ParseErrors | Format-List
+                  exit 1
+              }
+          }

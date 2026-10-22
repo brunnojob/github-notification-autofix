@@ -4,6 +4,16 @@ Monitor GitHub notifications, diagnose actionable failures with Codex CLI, publi
 
 Supports failing CI runs, pull requests with failing checks or requested changes, and issues identified as bugs. Repairs are limited to repositories and forks owned by `brunnojob` with write access. Protected branches, unavailable infrastructure, pending checks, and outstanding review requests remain unresolved and are recorded in local logs.
 
+## Interactive demonstration
+
+[Open the interactive demo](https://brunnojob.github.io/github-notification-autofix/)
+
+Play a successful repair or inspect pending checks, a concurrent branch change and missing write permission. The page replays evidence generated during its GitHub Actions build. It shows the actual before/after output of three Python fixture tests and decisions made by the real monitor and SQLite state handling.
+
+GitHub API responses, Codex repair and remote publishing are test doubles. The fixture repair is deterministic; the demo does not claim to execute Codex, access notifications or repair live repositories in the browser. Use the verification link and downloadable JSON on the page to inspect the exact source commit and recorded results.
+
+Generate the recording locally with `python demo/record.py`, then serve `site/` through a local HTTP server. No account or credentials are needed for this demonstration. Append `?lang=pt` for Portuguese; English is the default.
+
 ## Requirements
 
 - Python 3.10 or later and Git.

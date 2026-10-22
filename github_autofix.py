@@ -34,6 +34,10 @@ class Blocked(Exception):
     pass
 
 
+class ResourceMissing(Blocked):
+    pass
+
+
 class RetryLater(Exception):
     def __init__(self, message, delay=300, reset_target=False, pause_scan=False):
         super().__init__(message)
@@ -85,7 +89,7 @@ class GitHub:
             if error.code == 403:
                 raise Blocked('Acesso recusado: verifique os escopos do token e as permissões.') from None
             if error.code == 404:
-                raise Blocked('Recurso inexistente ou inacessível para brunnojob.') from None
+                raise ResourceMissing('Recurso inexistente ou inacessível para brunnojob.') from None
             raise RetryLater(f'GitHub respondeu HTTP {error.code}.') from None
         except (OSError, ValueError):
             raise RetryLater('Conexão ou resposta GitHub inválida.', pause_scan=True) from None
@@ -105,10 +109,12 @@ class GitHub:
             match = re.search(r'<([^>]+)>;\s*rel="next"', headers.get('Link', ''))
             url = match.group(1) if match else None
 
-    def done(self, thread):
+    def done(self, thread, guard=None):
         current = self.get('/notifications/threads/' + thread['id'])
         if current['updated_at'] != thread['updated_at']:
             raise RetryLater('A notificação recebeu atividade nova; será reavaliada.', 60)
+        if guard:
+            guard()
         self.request('/notifications/threads/' + thread['id'], 'DELETE')
 
 
@@ -118,18 +124,27 @@ class State:
         root.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(root / 'state.sqlite3')
         self.db.execute('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, version TEXT NOT NULL, status TEXT NOT NULL, retry REAL NOT NULL, target TEXT)')
+        columns = {row[1] for row in self.db.execute('PRAGMA table_info(threads)')}
+        if 'outcome' not in columns:
+            self.db.execute('ALTER TABLE threads ADD COLUMN outcome TEXT')
         self.db.commit()
 
     def previous(self, thread):
-        row = self.db.execute('SELECT version, status, retry, target FROM threads WHERE id = ?', (thread['id'],)).fetchone()
+        row = self.db.execute('SELECT version, status, retry, target, outcome FROM threads WHERE id = ?', (thread['id'],)).fetchone()
         if not row or row[0] != thread['updated_at']:
             return None
-        return {'status': row[1], 'retry': row[2], 'target': json.loads(row[3]) if row[3] else None}
+        return {'status': row[1], 'retry': row[2], 'target': json.loads(row[3]) if row[3] else None,
+                'outcome': json.loads(row[4]) if row[4] else None}
 
-    def save(self, thread, status, delay=0, target=None):
-        self.db.execute('INSERT OR REPLACE INTO threads VALUES (?, ?, ?, ?, ?)',
+    def save(self, thread, status, delay=0, target=None, outcome=None):
+        previous = self.previous(thread)
+        if previous and previous['outcome']:
+            outcome = {**previous['outcome'], **(outcome or {})}
+        if target is None and previous and status in {'done', 'blocked'}:
+            target = previous['target']
+        self.db.execute('INSERT OR REPLACE INTO threads (id, version, status, retry, target, outcome) VALUES (?, ?, ?, ?, ?, ?)',
                         (thread['id'], thread['updated_at'], status, time.time() + delay,
-                         json.dumps(target) if target else None))
+                         json.dumps(target) if target else None, json.dumps(outcome) if outcome else None))
         self.db.commit()
 
     def log(self, thread, status, message, **extra):
@@ -142,15 +157,95 @@ class State:
         print(line, flush=True)
 
 
-def checks(github, repo, sha):
+def checks(github, repo, sha, required=None, workflows=None):
     runs = list(github.pages(f'/repos/{repo}/commits/{sha}/check-runs?filter=latest', 'check_runs'))
-    statuses = github.get(f'/repos/{repo}/commits/{sha}/status').get('statuses', [])
-    failed = [r for r in runs if r.get('conclusion') in BAD]
+    statuses = list(github.pages(f'/repos/{repo}/commits/{sha}/status', 'statuses'))
+    failed = [r for r in runs if r.get('conclusion') in BAD or r.get('conclusion') == 'cancelled']
     failed += [s for s in statuses if s.get('state') in {'failure', 'error'}]
     pending = any(r.get('status') != 'completed' for r in runs) or any(s.get('state') == 'pending' for s in statuses)
     green = bool(runs or statuses) and not failed and not pending
     green = green and all(r.get('conclusion') in GOOD for r in runs) and all(s.get('state') == 'success' for s in statuses)
-    return {'green': green, 'pending': pending, 'failed': failed, 'count': len(runs) + len(statuses)}
+    missing = []
+    invalid = []
+    workflow_runs = []
+    if required is not None:
+        invalid = [r.get('html_url') for r in runs if r.get('head_sha') != sha]
+        invalid += [s.get('url') for s in statuses
+                    if urllib.parse.urlsplit(s.get('url', '')).path != f'/repos/{repo}/statuses/{sha}']
+        for rule in required:
+            matches = [r for r in runs if r.get('name') == rule['context']
+                       and (rule.get('app_id') in (None, -1) or r.get('app', {}).get('id') == rule['app_id'])]
+            legacy = [s for s in statuses if s.get('context') == rule['context'] and rule.get('app_id') in (None, -1)]
+            if not matches and not legacy:
+                missing.append(rule['context'])
+        workflow_runs = list(github.pages('/repos/' + repo + '/actions/runs?' +
+                                         urllib.parse.urlencode({'head_sha': sha}), 'workflow_runs'))
+        latest = {}
+        for run in workflow_runs:
+            key = (run.get('workflow_id'), run.get('event'))
+            order = (run.get('run_number', 0), run.get('run_attempt', 1), run.get('id', 0))
+            if key not in latest or order > latest[key][0]:
+                latest[key] = (order, run)
+        workflow_runs = [value[1] for value in latest.values()]
+        for workflow in workflows or []:
+            matches = [r for r in workflow_runs if r.get('workflow_id') == workflow['id']
+                       and r.get('event') == workflow['event'] and r.get('path') == workflow['path']]
+            if not matches:
+                missing.append('workflow:' + workflow['path'])
+            for run in matches:
+                if (run.get('head_sha') != sha or
+                        run.get('repository', {}).get('full_name', '').casefold() != repo.casefold()):
+                    invalid.append(run.get('html_url'))
+                if run.get('status') != 'completed':
+                    pending = True
+                elif run.get('conclusion') != 'success':
+                    failed.append(run)
+        for run in runs:
+            if run.get('app', {}).get('slug') == 'github-actions':
+                associated = [w for w in workflow_runs if w.get('check_suite_id') == run.get('check_suite', {}).get('id')]
+                if not associated or any(w.get('head_sha') != sha or
+                        w.get('repository', {}).get('full_name', '').casefold() != repo.casefold() for w in associated):
+                    invalid.append(run.get('html_url'))
+    urls = [r.get('html_url') for r in runs + workflow_runs] + [s.get('target_url') for s in statuses]
+    return {'green': green and not missing and not invalid and not failed and not pending,
+            'pending': pending or bool(missing), 'failed': failed, 'count': len(runs) + len(statuses),
+            'missing': missing, 'invalid': invalid, 'check_run_urls': list(dict.fromkeys(u for u in urls if u))}
+
+
+def required_checks(github, repo, branch):
+    encoded = urllib.parse.quote(branch, safe='')
+    required = []
+    try:
+        protection = github.get(f'/repos/{repo}/branches/{encoded}/protection/required_status_checks')
+    except ResourceMissing:
+        protection = {}
+    required.extend(protection.get('checks', []))
+    required.extend({'context': name} for name in protection.get('contexts', [])
+                    if name not in {c['context'] for c in required})
+    for rule in github.pages(f'/repos/{repo}/rules/branches/{encoded}'):
+        if rule['type'] == 'required_status_checks':
+            required.extend({'context': c['context'], 'app_id': c.get('integration_id')}
+                            for c in rule['parameters']['required_status_checks'])
+        elif rule['type'] == 'workflows':
+            raise Blocked('Ruleset com workflow obrigatório exige verificação específica; Done bloqueado.')
+    return required
+
+
+def verification_policy(github, context, target):
+    repo = context.get('check_repo', target['repo'])
+    branch = target['branch']
+    if context.get('pr_url'):
+        pr = github.get(context['pr_url'])
+        branch = pr['base']['ref']
+    workflows = list(github.pages('/repos/' + repo + '/actions/runs?' +
+                                  urllib.parse.urlencode({'head_sha': target['sha']}), 'workflow_runs'))
+    identities = {(r['workflow_id'], r['path'], r['event'])
+                  for r in workflows + context.get('source_workflows', [])}
+    if not identities:
+        raise Blocked('Workflow de origem não identificado; verificação automática bloqueada.')
+    required_checks(github, repo, branch)
+    return {'check_repo': repo, 'pr_url': context.get('pr_url'), 'base_branch': branch,
+            'workflows': [{'id': wid, 'path': path, 'event': event} for wid, path, event in sorted(identities)]}
 
 
 def branch_head(github, repo, branch):
@@ -231,6 +326,7 @@ def resolve_context(github, thread, account):
         else:
             raise Blocked('Notificação de CI sem identificação verificável do run; permaneceu aberta.')
         candidates = list(github.pages('/repos/' + repo + '/actions/runs' + query, 'workflow_runs'))
+        context['source_workflows'] = candidates
         failed = [r for r in candidates if r.get('conclusion') in BAD]
         if not failed and suite and suite.get('conclusion') in BAD:
             metadata = github.get('/repos/' + repo)
@@ -381,24 +477,52 @@ def publish(github, context, checkout, report):
 
 
 def verified_done(github, context, target):
-    if branch_head(github, target['repo'], target['branch']) != target['sha']:
-        raise RetryLater('Existe um commit mais novo na branch; reavaliar antes de Done.', 60, reset_target=True)
-    repo = context.get('check_repo', target['repo'])
-    current = checks(github, repo, target['sha'])
+    def assert_head():
+        if branch_head(github, target['repo'], target['branch']) != target['sha']:
+            raise RetryLater('Existe um commit mais novo na branch; reavaliar antes de Done.', 60, reset_target=True)
+        if context.get('pr_url'):
+            pr = github.get(context['pr_url'])
+            head = pr['head']
+            if (head['sha'] != target['sha'] or head['ref'] != target['branch'] or
+                    (head.get('repo') or {}).get('full_name', '').casefold() != target['repo'].casefold() or
+                    pr['base']['ref'] != policy['base_branch'] or
+                    pr['base']['repo']['full_name'].casefold() != policy['check_repo'].casefold()):
+                raise RetryLater('O head ou destino do PR mudou; reavaliar antes de Done.', 60, reset_target=True)
+
+    policy = target.get('verification')
+    if not policy:
+        raise RetryLater('Tentativa antiga sem identidade de workflow; reavaliar.', 60, reset_target=True)
+    context['pr_url'] = policy.get('pr_url')
+    assert_head()
+    repo = policy['check_repo']
+    required = required_checks(github, repo, policy['base_branch'])
+    current = checks(github, repo, target['sha'], required, policy['workflows'])
+    context['outcome'] = {'notification_handled': False, 'repair_verified': False,
+                          'attempted_sha': target['sha'], 'repository': repo,
+                          'check_run_urls': current['check_run_urls'], 'required_checks': required,
+                          'workflows': policy['workflows'], 'verification': current}
     if not current['green']:
         return False
     if context.get('pr_url'):
-        pr = github.get(context['pr_url'])
-        if pr['head']['sha'] != target['sha']:
-            return False
         latest = {}
         for review in github.pages(context['pr_url'] + '/reviews'):
             if review.get('state') in {'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'}:
                 latest[review['user']['login']] = review['state']
         if 'CHANGES_REQUESTED' in latest.values():
             return False
-    github.done(context['thread'])
+    assert_head()
+    github.done(context['thread'], guard=assert_head)
+    context['outcome'].update(notification_handled=True, repair_verified=True)
     return True
+
+
+def record_verification(github, state, thread, context, target):
+    try:
+        return verified_done(github, context, target)
+    finally:
+        if context.get('outcome'):
+            state.save(thread, 'awaiting_checks', 60, target, context['outcome'])
+            state.log(thread, 'verification', 'Resultado da verificação independente.', outcome=context['outcome'])
 
 
 def handle(github, state, thread, args):
@@ -413,11 +537,11 @@ def handle(github, state, thread, args):
         context = {'thread': thread, 'check_repo': thread['repository']['full_name']}
         if thread.get('subject', {}).get('type') == 'PullRequest':
             context['pr_url'] = thread['subject']['url']
-        if verified_done(github, context, target):
-            state.save(thread, 'done')
-            state.log(thread, 'done', 'Checks aprovados; notificação marcada Done.', target=target)
+        if record_verification(github, state, thread, context, target):
+            state.save(thread, 'done', target=target, outcome=context.get('outcome'))
+            state.log(thread, 'done', 'Checks aprovados; notificação marcada Done.', target=target, outcome=context.get('outcome'))
         else:
-            state.save(thread, 'awaiting_checks', 60, target)
+            state.save(thread, 'awaiting_checks', 60, target, context.get('outcome'))
         return
     context = resolve_context(github, thread, args.account)
     if context.get('closed'):
@@ -425,26 +549,30 @@ def handle(github, state, thread, args):
             state.log(thread, 'preview', 'Thread de issue/PR encerrado; pode ser marcado Done.')
             return
         github.done(thread)
-        state.save(thread, 'done')
+        state.save(thread, 'done', outcome={'notification_handled': True, 'repair_verified': False, 'reason': 'subject_closed'})
         state.log(thread, 'done', 'Issue ou PR encerrado; notificação marcada Done.')
         return
     if context.get('not_actionable'):
-        state.save(thread, 'ignored')
+        state.save(thread, 'ignored', outcome={'notification_handled': True, 'repair_verified': False, 'reason': 'not_actionable'})
         return
     if not args.apply:
         state.log(thread, 'preview', 'Problema identificado; use --apply para acionar Codex e publicar correções.', target=context['target'])
         return
-    if context.get('already_green') and verified_done(github, context, context['target']):
-        state.save(thread, 'done')
+    context['target']['verification'] = verification_policy(github, context, context['target'])
+    if context.get('already_green') and record_verification(github, state, thread, context, context['target']):
+        state.save(thread, 'done', target=context['target'], outcome=context.get('outcome'))
         state.log(thread, 'done', 'Falha antiga superada por checks aprovados; Done.')
         return
     checkout, report = agent_repair(context, state.root, args.agent_timeout)
     target = publish(github, context, checkout, report)
-    state.save(thread, 'awaiting_checks', 60, target)
+    state.save(thread, 'awaiting_checks', 60, target, {'notification_handled': False, 'repair_verified': False,
+               'attempted_sha': target['sha'], 'check_run_urls': [], 'local_tests': report['tests']})
     state.log(thread, 'awaiting_checks', report['summary'], target=target, tests=report['tests'])
-    if verified_done(github, context, target):
-        state.save(thread, 'done')
-        state.log(thread, 'done', 'Correção verificada no GitHub; notificação marcada Done.', target=target)
+    if record_verification(github, state, thread, context, target):
+        state.save(thread, 'done', target=target, outcome=context.get('outcome'))
+        state.log(thread, 'done', 'Correção verificada no GitHub; notificação marcada Done.', target=target, outcome=context.get('outcome'))
+    else:
+        state.save(thread, 'awaiting_checks', 60, target, context.get('outcome'))
 
 
 def main():

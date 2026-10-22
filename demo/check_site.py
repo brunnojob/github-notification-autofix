@@ -20,7 +20,7 @@ class Assets(HTMLParser):
 
 Assets().feed((SITE / 'index.html').read_text(encoding='utf-8'))
 evidence = json.loads((SITE / 'evidence.json').read_text(encoding='utf-8'))
-assert {s['id'] for s in evidence['scenarios']} == {'success', 'pending', 'race', 'permission'}
+assert {s['id'] for s in evidence['scenarios']} == {'success', 'pending', 'race', 'permission', 'late_green'}
 for case in evidence['scenarios']:
     assert case['done_calls'] == (1 if case['id'] == 'success' else 0)
     if case['id'] != 'permission':

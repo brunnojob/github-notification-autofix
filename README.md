@@ -8,11 +8,29 @@ Supports failing CI runs, pull requests with failing checks or requested changes
 
 [Open the interactive demo](https://brunnojob.github.io/github-notification-autofix/)
 
-Play a successful repair or inspect pending checks, a concurrent branch change and missing write permission. The page replays evidence generated during its GitHub Actions build. It shows the actual before/after output of three Python fixture tests and decisions made by the real monitor and SQLite state handling.
+Play a successful repair or inspect pending checks, a concurrent branch change, missing write permission, and a late green result for an obsolete commit. The page replays evidence generated during its GitHub Actions build. It shows the actual before/after output of three Python fixture tests and decisions made by the real monitor and SQLite state handling.
 
 GitHub API responses, Codex repair and remote publishing are test doubles. The fixture repair is deterministic; the demo does not claim to execute Codex, access notifications or repair live repositories in the browser. Use the verification link and downloadable JSON on the page to inspect the exact source commit and recorded results.
 
 Generate the recording locally with `python demo/record.py`, then serve `site/` through a local HTTP server. No account or credentials are needed for this demonstration. Append `?lang=pt` for Portuguese; English is the default.
+
+## Verification boundary
+
+A notification identifies work to inspect; it does not identify the commit that passed verification. Each repair stores its attempted SHA and expected workflow identities before waiting for remote results. Local tests and an agent's `fixed` report only permit publishing a candidate repair.
+
+Before Done, the monitor:
+
+- Reads the current branch and PR head, including the head repository and base branch.
+- Reads required status checks from classic branch protection and active branch rulesets for the PR base branch (or repaired branch for non-PR work). Missing required checks keep the repair unverified. Permission errors block completion. Unsupported ruleset-required workflows block completion explicitly.
+- Fetches all pages of check runs and commit statuses for the attempted SHA. It checks SHA and expected app identity, and correlates GitHub Actions checks with workflow runs from the same repository, SHA, workflow ID, path and triggering event. Workflows from the source notification remain required even when absent from the new head.
+- Requires the expected workflows' latest attempts and all observed checks to pass, with no pending, missing, cancelled or failed check. Outstanding change requests keep the notification open.
+- Reads the head again after reviewing results and immediately before the notification DELETE. A newer commit C invalidates B and schedules re-evaluation.
+
+SQLite outcomes separately record `notification_handled` and `repair_verified`, the attempted SHA, required checks, workflow identities, check-run URLs and local test commands. Closing an issue/PR can handle its notification without verifying a repair. Existing databases migrate automatically; pending records without workflow identity must be re-evaluated.
+
+The **Late green for obsolete commit A** demo records A failing, a repair publishing B, A's delayed green result, B still pending and then a required B check failing. The real monitor makes zero Done calls in both B states; the recorded JSON includes the attempted B SHA and check URLs. The tests also push C while B's evidence is being read and reject mismatched repositories, workflows and SHAs.
+
+GitHub does not provide an atomic operation combining PR-head comparison and notification deletion. Repeated head reads narrow that race; the stored verification describes the head observed immediately before deletion, not a guarantee about future pushes. Review approvals, deployments and other non-check merge requirements are outside this check-verification boundary.
 
 ## Requirements
 

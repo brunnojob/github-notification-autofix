@@ -21,7 +21,7 @@ jobs:
           python-version: '3.12'
       - name: Verify the real monitor
         run: python -m unittest discover -s . -p 'test_*.py'
-      - name: Execute and record the four demo scenarios
+      - name: Execute and record the five demo scenarios
         run: python demo/record.py
       - name: Validate static assets
         run: python demo/check_site.py

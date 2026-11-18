@@ -60,14 +60,24 @@ let playing = false;
 let timer;
 let speed = 900;
 let view = 'diff';
+let recording = new URL(location.href).searchParams.get('record') === '1';
+let touring = false;
+let tourTimer;
+const tourOrder = ['success', 'pending', 'race', 'permission', 'late_green'];
+const showcase = {
+  en: {title:'Explore the evidence gallery', lead:'Five recorded scenarios, five decisions. Choose one to inspect its patch, test output and verification boundary.', record:'Recording mode', exit:'Exit recording mode', tour:'Play guided tour', end:'Stop tour', next:'Open scenario', kept:'Notification stays open', done:'Notification marked Done', note:'RECORDED PYTHON FIXTURES · GITHUB / CODEX TEST DOUBLES', descriptions:{success:'Three fixture tests fail, the focused patch passes, and current checks allow Done.',pending:'Passing local tests do not override remote checks that are still pending.',race:'A different branch head prevents the older repair from being accepted.',permission:'Missing write access blocks repair before a patch is attempted.',late_green:'Green checks for old commit A do not verify repair B; a failed B check keeps it open.'}},
+  pt: {title:'Explore a galeria de evidências', lead:'Cinco cenários gravados, cinco decisões. Escolha um para inspecionar alteração, testes e limite de verificação.', record:'Modo de gravação', exit:'Sair da gravação', tour:'Reproduzir tour guiado', end:'Parar tour', next:'Abrir cenário', kept:'Notificação mantida aberta', done:'Notificação marcada Done', note:'EXEMPLOS PYTHON GRAVADOS · GITHUB / CODEX SUBSTITUÍDOS POR TESTES', descriptions:{success:'Três testes falham, a correção passa e os checks atuais permitem Done.',pending:'Testes locais aprovados não substituem checks remotos ainda pendentes.',race:'Uma alteração no head impede aceitar a correção antiga.',permission:'Sem acesso de escrita, o reparo é bloqueado antes de qualquer alteração.',late_green:'Checks verdes do commit antigo A não verificam B; a falha em B mantém a notificação aberta.'}}
+};
 const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const scenario = () => evidence.scenarios.find(s => s.id === selected);
 const seen = () => scenario().events.slice(0, index + 1);
 const finished = () => index >= scenario().events.length - 1;
-const stop = () => { clearTimeout(timer); playing = false; };
+const stop = () => { clearTimeout(timer); clearTimeout(tourTimer); playing = false; touring = false; };
 
 function mount() {
   const t = copy[lang];
+  const g = showcase[lang];
+  document.body.classList.toggle('recording', recording);
   document.documentElement.lang = lang === 'pt' ? 'pt-BR' : 'en';
   document.title = lang === 'pt' ? 'AutoFix — da notificação à correção verificada' : 'AutoFix — from notification to verified fix';
   document.querySelector('.skip').textContent = lang === 'pt' ? 'Pular para a demonstração' : 'Skip to demo';
@@ -75,15 +85,19 @@ function mount() {
   const runUrl = /^https:\/\/github\.com\/brunnojob\/github-notification-autofix\/actions\/runs\/\d+$/.test(evidence.workflow_url || '') ? evidence.workflow_url : `${REPO}/actions/workflows/pages.yml`;
   app.innerHTML = `<header class="site-header"><div class="shell header-inner"><a href="${REPO}" class="brand"><img src="./favicon.svg" alt="">AutoFix <small>${t.badge}</small></a><div class="header-actions"><a href="${REPO}">${t.source}</a><label class="language">${t.language}<select id="language" aria-label="${t.language}"><option value="en"${lang==='en'?' selected':''}>EN</option><option value="pt"${lang==='pt'?' selected':''}>PT</option></select></label></div></div></header>
   <main class="shell"><section class="intro"><div><div class="eyebrow">${t.eyebrow}</div><h1>${t.title}</h1><p>${t.lead}</p></div><p class="intro-note"><strong>${t.noteTitle}</strong>${t.note}</p></section>
-  <section id="demo" aria-label="${t.badge}"><div class="toolbar"><label>${t.scenario}<select id="scenario" aria-label="${t.scenario}">${Object.entries(t.scenarios).map(([key,label])=>`<option value="${key}"${key===selected?' selected':''}>${label}</option>`).join('')}</select></label><div class="controls"><button id="play" class="btn primary">${t.play}</button><button id="next" class="btn">${t.next}</button><button id="reset" class="btn">${t.reset}</button><button id="speed" class="btn speed" aria-label="${lang==='pt'?'Velocidade da reprodução':'Playback speed'}">${speed===900?'1×':'4×'}</button></div></div>
+  <section id="demo" aria-label="${t.badge}"><div class="showcase-tools"><span>${g.note}</span><div><button class="btn" id="record" aria-pressed="${recording}">${recording?g.exit:g.record}</button><button class="btn primary" id="tour">${touring?g.end:g.tour}</button></div></div><div class="toolbar"><label>${t.scenario}<select id="scenario" aria-label="${t.scenario}">${Object.entries(t.scenarios).map(([key,label])=>`<option value="${key}"${key===selected?' selected':''}>${label}</option>`).join('')}</select></label><div class="controls"><button id="play" class="btn primary">${t.play}</button><button id="next" class="btn">${t.next}</button><button id="reset" class="btn">${t.reset}</button><button id="speed" class="btn speed" aria-label="${lang==='pt'?'Velocidade da reprodução':'Playback speed'}">${speed===900?'1×':'4×'}</button></div></div>
   <div class="workspace"><aside class="timeline"><p class="label">${t.pipeline}</p><ol>${steps.map((key,i)=>`<li data-step="${key}"><span class="step-icon">${i+1}</span><div class="step-copy"><strong>${t.steps[key]}</strong><small>${t.ready}</small></div></li>`).join('')}</ol><p class="local-tag">${t.local}</p></aside>
   <div class="work-main"><div class="notification"><span class="notification-icon" aria-hidden="true">!</span><div><p>brunnojob / autofix-demo-fixture</p><h2>${t.notificationTitle}</h2><small>${t.notificationNote}</small></div><span id="outcome-tag" class="tag">${t.recorded}</span></div>
   <div class="tabs" role="tablist" aria-label="${lang==='pt'?'Visualização do código':'Code view'}">${Object.entries(t.tabs).map(([key,label])=>`<button class="tab" id="tab-${key}" role="tab" data-view="${key}" aria-controls="code" aria-selected="${view===key}" tabindex="${view===key?0:-1}">${label}</button>`).join('')}</div>
   <div id="code" class="code-area" role="tabpanel" tabindex="0"></div>
   <div class="console"><div class="console-head"><span>${t.console}</span><span>${t.replayLabel}</span></div><pre id="transcript" tabindex="0"></pre></div>
   <div class="status-bar"><strong id="status" role="status" aria-live="polite"></strong><span id="done-count" class="outcome"></span></div></div></div></section>
+  <section id="gallery" class="gallery"><h2>${g.title}</h2><p>${g.lead}</p><div class="gallery-grid">${evidence.scenarios.map((item,i)=>`<article class="gallery-card"><span class="label">0${i+1} / ${item.done_calls?'DONE':'OPEN'}</span><h3>${t.scenarios[item.id]}</h3><p>${g.descriptions[item.id]}</p><strong class="gallery-outcome">${item.done_calls?g.done:g.kept} · ${t.doneCalls}: ${item.done_calls}</strong><button class="btn" data-scenario="${item.id}">${g.next} →</button></article>`).join('')}</div></section>
   <section class="evidence"><div><h2>${t.evidenceTitle}</h2><p>${t.evidence}</p><div class="evidence-links"><a href="${runUrl}" target="_blank" rel="noopener noreferrer">${t.run}</a><a href="./evidence.json" download="autofix-evidence.json">${t.download}</a><a href="${REPO}/blob/${sha||'main'}/demo/record.py" target="_blank" rel="noopener noreferrer">${t.implementation}</a></div><p class="metadata">${t.commit}: ${sha ? `<a href="${REPO}/commit/${sha}">${sha.slice(0,12)}</a>` : 'local'} · SHA-256: ${esc(evidence.source_hash.slice(0,16))}…</p></div><div class="local-use"><h2>${t.installTitle}</h2><p>${t.install}</p><code>python github_autofix.py --once\npython github_autofix.py --apply</code><div class="evidence-links"><a href="${REPO}#requirements">${t.installLink}</a></div></div></section>
   <footer class="footer"><a href="${REPO}">${t.footer}</a><span>${t.footerNote}</span></footer></main>`;
+  document.querySelector('#record').addEventListener('click',()=>{recording=!recording;const url=new URL(location.href);if(recording)url.searchParams.set('record','1');else url.searchParams.delete('record');history.replaceState(null,'',url);mount();document.querySelector('#demo').scrollIntoView({block:'start'});});
+  document.querySelector('#tour').addEventListener('click',()=>{if(touring){stop();mount();return;}stop();touring=true;selected=tourOrder[0];index=-1;view='diff';mount();playing=true;advance();document.querySelector('#demo').scrollIntoView({block:'start'});});
+  document.querySelectorAll('[data-scenario]').forEach(button=>button.addEventListener('click',()=>{stop();selected=button.dataset.scenario;index=-1;view='diff';mount();document.querySelector('#demo').scrollIntoView({block:'start'});}));
   document.querySelector('#language').addEventListener('change', e => {stop();lang=e.target.value;const url=new URL(location.href);url.searchParams.set('lang',lang);history.replaceState(null,'',url);mount();});
   document.querySelector('#scenario').addEventListener('change', e => {stop();selected=e.target.value;index=-1;mount();});
   document.querySelector('#play').addEventListener('click', () => {if(playing){stop();update();return;}if(finished())index=-1;playing=true;advance();});
@@ -97,7 +111,18 @@ function mount() {
   update();
 }
 function selectView(value){view=value;document.querySelectorAll('[data-view]').forEach(b=>{b.setAttribute('aria-selected',String(b.dataset.view===view));b.tabIndex=b.dataset.view===view?0:-1;});renderCode();}
-function advance(){clearTimeout(timer);if(index<scenario().events.length-1)index++;if(finished())playing=false;update();if(playing)timer=setTimeout(advance,speed);}
+function advance(){
+  clearTimeout(timer);
+  if(index<scenario().events.length-1)index++;
+  if(finished())playing=false;
+  update();
+  if(playing){timer=setTimeout(advance,speed);return;}
+  if(touring&&finished()){
+    const next=tourOrder.indexOf(selected)+1;
+    if(next>=tourOrder.length){touring=false;document.querySelector('#tour').textContent=showcase[lang].tour;return;}
+    tourTimer=setTimeout(()=>{selected=tourOrder[next];index=-1;view='diff';mount();playing=true;advance();},speed===900?2800:1200);
+  }
+}
 function renderCode(){
   const t=copy[lang];const target=document.querySelector('#code');target.setAttribute('aria-labelledby',`tab-${view}`);
   const repaired=seen().some(e=>e.step==='repair');
@@ -108,6 +133,7 @@ function renderCode(){
 function update(){
   const t=copy[lang];const current=seen();const last=current.at(-1);
   for(const key of steps){const item=document.querySelector(`[data-step="${key}"]`);const event=current.filter(e=>e.step===key).at(-1);item.className=event?.state||'';item.querySelector('.step-icon').textContent=event?(event.state==='success'?'✓':event.state==='waiting'?'…':'!'):String(steps.indexOf(key)+1);item.querySelector('small').textContent=event?t[event.state]:t.ready;}
+  document.querySelector('#tour').textContent=touring?showcase[lang].end:showcase[lang].tour;
   document.querySelector('#play').textContent=playing?t.pause:finished()?t.replay:index>=0?t.resume:t.play;
   document.querySelector('#next').disabled=finished();
   document.querySelector('#status').textContent=finished()?t.results[scenario().result]:playing?t.running:index<0?t.initialStatus:t.paused;

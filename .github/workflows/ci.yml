@@ -37,3 +37,21 @@ jobs:
                   exit 1
               }
           }
+
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check site/app.js
+      - run: python demo/record.py
+      - run: python demo/check_site.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recorded-demo-evidence
+          path: site/evidence.json

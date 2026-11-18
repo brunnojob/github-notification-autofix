@@ -1,5 +1,12 @@
 # GitHub Notification AutoFix
 
+[![Verify](https://github.com/brunnojob/github-notification-autofix/actions/workflows/ci.yml/badge.svg)](https://github.com/brunnojob/github-notification-autofix/actions)
+[![Pages](https://github.com/brunnojob/github-notification-autofix/actions/workflows/pages.yml/badge.svg)](https://github.com/brunnojob/github-notification-autofix/actions/workflows/pages.yml)
+
+[![Recorded Python verification workflow preview](site/preview.png)](https://brunnojob.github.io/github-notification-autofix/)
+
+[Interactive demo](https://brunnojob.github.io/github-notification-autofix/) · [Scenario gallery](https://brunnojob.github.io/github-notification-autofix/#gallery) · [Recording mode](https://brunnojob.github.io/github-notification-autofix/?record=1#demo) · [Video guide](docs/recording.md)
+
 Monitor GitHub notifications, diagnose actionable failures with Codex CLI, publish focused fixes, and mark notifications as Done after the current commit passes its GitHub checks.
 
 Supports failing CI runs, pull requests with failing checks or requested changes, and issues identified as bugs. Repairs are limited to repositories and forks owned by `brunnojob` with write access. Protected branches, unavailable infrastructure, pending checks, and outstanding review requests remain unresolved and are recorded in local logs.

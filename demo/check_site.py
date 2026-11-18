@@ -1,6 +1,7 @@
 import json
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / 'site'
@@ -13,7 +14,7 @@ class Assets(HTMLParser):
             if name.startswith('on'):
                 raise AssertionError('Inline executable attribute')
             if name in {'src', 'href'} and value.startswith('./'):
-                assert (SITE / value[2:]).is_file(), value
+                assert (SITE / urlsplit(value).path[2:]).is_file(), value
         if tag == 'script':
             assert attributes.get('src'), 'Inline script'
 
